@@ -336,3 +336,205 @@
 (define-read-only (estimate-land-value (area uint))
     (ok (/ (* area u1000) u1))
 )
+
+(define-map zoning-authorities principal bool)
+
+(define-map land-zoning
+    uint
+    {
+        zone-type: (string-ascii 30),
+        max-building-height: uint,
+        max-floor-area-ratio: uint,
+        allowed-uses: (list 10 (string-ascii 20)),
+        density-limit: uint,
+        setback-requirements: uint,
+        set-by: principal,
+        effective-date: uint,
+        expiry-date: (optional uint)
+    }
+)
+
+(define-map development-permissions
+    {parcel-id: uint, permit-id: uint}
+    {
+        applicant: principal,
+        permit-type: (string-ascii 30),
+        proposed-use: (string-ascii 20),
+        building-height: uint,
+        floor-area: uint,
+        application-date: uint,
+        status: (string-ascii 20),
+        approved-by: (optional principal),
+        approval-date: (optional uint),
+        conditions: (string-ascii 256)
+    }
+)
+
+(define-map parcel-permit-counter uint uint)
+
+(define-data-var permit-counter uint u0)
+
+(define-constant err-zoning-violation (err u104))
+(define-constant err-permit-expired (err u105))
+(define-constant err-invalid-authority (err u106))
+
+(define-public (add-zoning-authority (authority principal))
+    (begin
+        (asserts! (is-eq tx-sender contract-owner) err-not-authorized)
+        (map-set zoning-authorities authority true)
+        (ok true)
+    )
+)
+
+(define-public (remove-zoning-authority (authority principal))
+    (begin
+        (asserts! (is-eq tx-sender contract-owner) err-not-authorized)
+        (map-delete zoning-authorities authority)
+        (ok true)
+    )
+)
+
+(define-public (set-land-zoning (parcel-id uint) (zone-type (string-ascii 30)) (max-building-height uint) (max-floor-area-ratio uint) (allowed-uses (list 10 (string-ascii 20))) (density-limit uint) (setback-requirements uint) (expiry-date (optional uint)))
+    (let ((sender tx-sender)
+          (parcel (unwrap! (map-get? land-registry parcel-id) err-not-found)))
+        (asserts! (is-zoning-authority sender) err-not-authorized)
+        (asserts! (> (len zone-type) u0) err-invalid-params)
+        (asserts! (> (len allowed-uses) u0) err-invalid-params)
+        
+        (map-set land-zoning parcel-id {
+            zone-type: zone-type,
+            max-building-height: max-building-height,
+            max-floor-area-ratio: max-floor-area-ratio,
+            allowed-uses: allowed-uses,
+            density-limit: density-limit,
+            setback-requirements: setback-requirements,
+            set-by: sender,
+            effective-date: stacks-block-height,
+            expiry-date: expiry-date
+        })
+        (ok true)
+    )
+)
+
+(define-public (apply-for-development-permit (parcel-id uint) (permit-type (string-ascii 30)) (proposed-use (string-ascii 20)) (building-height uint) (floor-area uint) (conditions (string-ascii 256)))
+    (let ((sender tx-sender)
+          (parcel (unwrap! (map-get? land-registry parcel-id) err-not-found))
+          (current-counter (default-to u0 (map-get? parcel-permit-counter parcel-id)))
+          (new-counter (+ current-counter u1))
+          (global-permit-id (+ (var-get permit-counter) u1)))
+        (asserts! (is-eq sender (get owner parcel)) err-not-authorized)
+        (asserts! (> (len permit-type) u0) err-invalid-params)
+        (asserts! (> (len proposed-use) u0) err-invalid-params)
+        
+        (var-set permit-counter global-permit-id)
+        (map-set parcel-permit-counter parcel-id new-counter)
+        (map-set development-permissions {parcel-id: parcel-id, permit-id: new-counter} {
+            applicant: sender,
+            permit-type: permit-type,
+            proposed-use: proposed-use,
+            building-height: building-height,
+            floor-area: floor-area,
+            application-date: stacks-block-height,
+            status: "pending",
+            approved-by: none,
+            approval-date: none,
+            conditions: conditions
+        })
+        (ok new-counter)
+    )
+)
+
+(define-public (approve-development-permit (parcel-id uint) (permit-id uint))
+    (let ((sender tx-sender)
+          (permit-key {parcel-id: parcel-id, permit-id: permit-id})
+          (permit (unwrap! (map-get? development-permissions permit-key) err-not-found))
+          (zoning (unwrap! (map-get? land-zoning parcel-id) err-not-found)))
+        (asserts! (is-zoning-authority sender) err-not-authorized)
+        (asserts! (is-eq (get status permit) "pending") err-invalid-params)
+        (try! (validate-zoning-compliance parcel-id permit zoning))
+        
+        (map-set development-permissions permit-key 
+            (merge permit {
+                status: "approved",
+                approved-by: (some sender),
+                approval-date: (some stacks-block-height)
+            })
+        )
+        (ok true)
+    )
+)
+
+(define-public (reject-development-permit (parcel-id uint) (permit-id uint) (reason (string-ascii 256)))
+    (let ((sender tx-sender)
+          (permit-key {parcel-id: parcel-id, permit-id: permit-id})
+          (permit (unwrap! (map-get? development-permissions permit-key) err-not-found)))
+        (asserts! (is-zoning-authority sender) err-not-authorized)
+        (asserts! (is-eq (get status permit) "pending") err-invalid-params)
+        (asserts! (> (len reason) u0) err-invalid-params)
+        
+        (map-set development-permissions permit-key 
+            (merge permit {
+                status: "rejected",
+                approved-by: (some sender),
+                approval-date: (some stacks-block-height),
+                conditions: reason
+            })
+        )
+        (ok true)
+    )
+)
+
+(define-private (validate-zoning-compliance (parcel-id uint) (permit {applicant: principal, permit-type: (string-ascii 30), proposed-use: (string-ascii 20), building-height: uint, floor-area: uint, application-date: uint, status: (string-ascii 20), approved-by: (optional principal), approval-date: (optional uint), conditions: (string-ascii 256)}) (zoning {zone-type: (string-ascii 30), max-building-height: uint, max-floor-area-ratio: uint, allowed-uses: (list 10 (string-ascii 20)), density-limit: uint, setback-requirements: uint, set-by: principal, effective-date: uint, expiry-date: (optional uint)}))
+    (let ((proposed-use (get proposed-use permit))
+          (building-height (get building-height permit))
+          (floor-area (get floor-area permit))
+          (parcel (unwrap! (map-get? land-registry parcel-id) err-not-found))
+          (parcel-area (get area parcel))
+          (floor-area-ratio (/ floor-area parcel-area)))
+        (asserts! (<= building-height (get max-building-height zoning)) err-zoning-violation)
+        (asserts! (<= floor-area-ratio (get max-floor-area-ratio zoning)) err-zoning-violation)
+        (asserts! (is-some (index-of (get allowed-uses zoning) proposed-use)) err-zoning-violation)
+        (match (get expiry-date zoning)
+            expiry (asserts! (< stacks-block-height expiry) err-permit-expired)
+            true
+        )
+        (ok true)
+    )
+)
+
+(define-read-only (get-land-zoning (parcel-id uint))
+    (map-get? land-zoning parcel-id)
+)
+
+(define-read-only (get-development-permit (parcel-id uint) (permit-id uint))
+    (map-get? development-permissions {parcel-id: parcel-id, permit-id: permit-id})
+)
+
+(define-read-only (get-permit-count (parcel-id uint))
+    (default-to u0 (map-get? parcel-permit-counter parcel-id))
+)
+
+(define-read-only (is-zoning-authority (authority principal))
+    (default-to false (map-get? zoning-authorities authority))
+)
+
+(define-read-only (check-development-compliance (parcel-id uint) (proposed-use (string-ascii 20)) (building-height uint) (floor-area uint))
+    (match (map-get? land-zoning parcel-id)
+        zoning (match (map-get? land-registry parcel-id)
+                   parcel (let ((parcel-area (get area parcel))
+                                (floor-area-ratio (/ floor-area parcel-area)))
+                              (and 
+                                  (<= building-height (get max-building-height zoning))
+                                  (<= floor-area-ratio (get max-floor-area-ratio zoning))
+                                  (is-some (index-of (get allowed-uses zoning) proposed-use))
+                                  (match (get expiry-date zoning)
+                                      expiry (< stacks-block-height expiry)
+                                      true
+                                  )
+                              )
+                          )
+                   false
+               )
+        false
+    )
+)
