@@ -536,5 +536,186 @@
                    false
                )
         false
+        )
+)
+
+(define-map mortgages
+    uint
+    {
+        borrower: principal,
+        lender: principal,
+        parcel-id: uint,
+        loan-amount: uint,
+        interest-rate: uint,
+        duration-blocks: uint,
+        start-block: uint,
+        monthly-payment: uint,
+        payments-made: uint,
+        total-payments: uint,
+        status: (string-ascii 20),
+        collateral-locked: bool
+    }
+)
+
+(define-map mortgage-payments
+    {mortgage-id: uint, payment-number: uint}
+    {
+        amount: uint,
+        payment-date: uint,
+        interest-portion: uint,
+        principal-portion: uint
+    }
+)
+
+(define-data-var mortgage-counter uint u0)
+(define-constant payment-interval-blocks u144)
+(define-constant err-insufficient-collateral (err u107))
+(define-constant err-payment-overdue (err u108))
+(define-constant err-mortgage-inactive (err u109))
+
+(define-public (create-mortgage (parcel-id uint) (loan-amount uint) (interest-rate uint) (duration-blocks uint))
+    (let ((sender tx-sender)
+          (parcel (unwrap! (map-get? land-registry parcel-id) err-not-found))
+          (mortgage-id (+ (var-get mortgage-counter) u1))
+          (total-payments (/ duration-blocks payment-interval-blocks))
+          (monthly-payment (/ (+ loan-amount (/ (* loan-amount interest-rate) u100)) total-payments)))
+        (asserts! (is-eq sender (get owner parcel)) err-not-authorized)
+        (asserts! (> loan-amount u0) err-invalid-params)
+        (asserts! (> interest-rate u0) err-invalid-params)
+        (asserts! (> duration-blocks payment-interval-blocks) err-invalid-params)
+        (asserts! (is-eq (get status parcel) "active") err-invalid-params)
+        
+        (var-set mortgage-counter mortgage-id)
+        (map-set mortgages mortgage-id {
+            borrower: sender,
+            lender: tx-sender,
+            parcel-id: parcel-id,
+            loan-amount: loan-amount,
+            interest-rate: interest-rate,
+            duration-blocks: duration-blocks,
+            start-block: u0,
+            monthly-payment: monthly-payment,
+            payments-made: u0,
+            total-payments: total-payments,
+            status: "pending",
+            collateral-locked: false
+        })
+        (ok mortgage-id)
+    )
+)
+
+(define-public (fund-mortgage (mortgage-id uint))
+    (let ((sender tx-sender)
+          (mortgage (unwrap! (map-get? mortgages mortgage-id) err-not-found))
+          (parcel-id (get parcel-id mortgage))
+          (parcel (unwrap! (map-get? land-registry parcel-id) err-not-found)))
+        (asserts! (is-eq (get status mortgage) "pending") err-invalid-params)
+        (asserts! (>= (stx-get-balance sender) (get loan-amount mortgage)) err-insufficient-collateral)
+        
+        (try! (stx-transfer? (get loan-amount mortgage) sender (get borrower mortgage)))
+        (try! (nft-transfer? land-parcel parcel-id (get borrower mortgage) (as-contract tx-sender)))
+        (map-set land-registry parcel-id 
+            (merge parcel {status: "mortgaged"}))
+        (map-set mortgages mortgage-id 
+            (merge mortgage {
+                lender: sender,
+                start-block: stacks-block-height,
+                status: "active",
+                collateral-locked: true
+            }))
+        (ok true)
+    )
+)
+
+(define-public (make-mortgage-payment (mortgage-id uint))
+    (let ((sender tx-sender)
+          (mortgage (unwrap! (map-get? mortgages mortgage-id) err-not-found))
+          (payment-number (+ (get payments-made mortgage) u1))
+          (payment-amount (get monthly-payment mortgage))
+          (interest-portion (/ (* (get loan-amount mortgage) (get interest-rate mortgage)) (* u100 (get total-payments mortgage))))
+          (principal-portion (- payment-amount interest-portion)))
+        (asserts! (is-eq sender (get borrower mortgage)) err-not-authorized)
+        (asserts! (is-eq (get status mortgage) "active") err-mortgage-inactive)
+        (asserts! (>= (stx-get-balance sender) payment-amount) err-insufficient-collateral)
+        (asserts! (< (get payments-made mortgage) (get total-payments mortgage)) err-invalid-params)
+        
+        (try! (stx-transfer? payment-amount sender (get lender mortgage)))
+        (map-set mortgage-payments {mortgage-id: mortgage-id, payment-number: payment-number} {
+            amount: payment-amount,
+            payment-date: stacks-block-height,
+            interest-portion: interest-portion,
+            principal-portion: principal-portion
+        })
+        (map-set mortgages mortgage-id 
+            (merge mortgage {payments-made: payment-number}))
+        
+        (if (is-eq payment-number (get total-payments mortgage))
+            (complete-mortgage mortgage-id)
+            (ok true)
+        )
+    )
+)
+
+(define-public (foreclose-mortgage (mortgage-id uint))
+    (let ((sender tx-sender)
+          (mortgage (unwrap! (map-get? mortgages mortgage-id) err-not-found))
+          (parcel-id (get parcel-id mortgage))
+          (parcel (unwrap! (map-get? land-registry parcel-id) err-not-found))
+          (expected-payment-block (+ (get start-block mortgage) (* (+ (get payments-made mortgage) u1) payment-interval-blocks))))
+        (asserts! (is-eq sender (get lender mortgage)) err-not-authorized)
+        (asserts! (is-eq (get status mortgage) "active") err-mortgage-inactive)
+        (asserts! (> stacks-block-height (+ expected-payment-block payment-interval-blocks)) err-payment-overdue)
+        (asserts! (< (get payments-made mortgage) (get total-payments mortgage)) err-invalid-params)
+        
+        (try! (nft-transfer? land-parcel parcel-id (as-contract tx-sender) sender))
+        (map-set land-registry parcel-id 
+            (merge parcel {
+                owner: sender,
+                status: "active",
+                last-transfer: stacks-block-height
+            }))
+        (map-set mortgages mortgage-id 
+            (merge mortgage {status: "foreclosed"}))
+        (ok true)
+    )
+)
+
+(define-private (complete-mortgage (mortgage-id uint))
+    (let ((mortgage (unwrap! (map-get? mortgages mortgage-id) err-not-found))
+          (parcel-id (get parcel-id mortgage))
+          (parcel (unwrap! (map-get? land-registry parcel-id) err-not-found)))
+        (try! (nft-transfer? land-parcel parcel-id (as-contract tx-sender) (get borrower mortgage)))
+        (map-set land-registry parcel-id 
+            (merge parcel {status: "active"}))
+        (map-set mortgages mortgage-id 
+            (merge mortgage {status: "completed"}))
+        (ok true)
+    )
+)
+
+(define-read-only (get-mortgage-details (mortgage-id uint))
+    (map-get? mortgages mortgage-id)
+)
+
+(define-read-only (get-payment-history (mortgage-id uint) (payment-number uint))
+    (map-get? mortgage-payments {mortgage-id: mortgage-id, payment-number: payment-number})
+)
+
+(define-read-only (calculate-remaining-balance (mortgage-id uint))
+    (match (map-get? mortgages mortgage-id)
+        mortgage (let ((total-amount (+ (get loan-amount mortgage) (/ (* (get loan-amount mortgage) (get interest-rate mortgage)) u100)))
+                       (paid-amount (* (get payments-made mortgage) (get monthly-payment mortgage))))
+                    (ok (- total-amount paid-amount)))
+        err-not-found
+    )
+)
+
+(define-read-only (is-payment-overdue (mortgage-id uint))
+    (match (map-get? mortgages mortgage-id)
+        mortgage (if (is-eq (get status mortgage) "active")
+                     (let ((expected-payment-block (+ (get start-block mortgage) (* (+ (get payments-made mortgage) u1) payment-interval-blocks))))
+                         (> stacks-block-height expected-payment-block))
+                     false)
+        false
     )
 )
