@@ -1,0 +1,15 @@
+[project]
+name = 'land-registry'
+description = 'Blockchain-based land registry system'
+authors = []
+telemetry = false
+cache_dir = './.clarinet/cache'
+requirements = []
+
+[contracts.land-registry]
+path = 'contracts/land-registry.clar'
+clarity_version = 3
+epoch = '3.0'
+
+[repl]
+parser_version = 2
