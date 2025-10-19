@@ -97,7 +97,7 @@
     (value uint)
 )
     (let ((property-id (+ (var-get property-counter) u1))
-          (current-time (unwrap! (get-block-info? time (- block-height u1)) ERR-UNAUTHORIZED)))
+          (current-block stacks-block-height))
         
         ;; Validate inputs
         (asserts! (> size u0) ERR-INVALID-PRICE)
@@ -117,8 +117,8 @@
                 size: size,
                 property-type: property-type,
                 value: value,
-                registration-date: current-time,
-                last-updated: current-time,
+                registration-date: current-block,
+                last-updated: current-block,
                 is-active: true
             }
         )
@@ -135,7 +135,7 @@
                     new-owner: tx-sender,
                     transaction-type: "registration",
                     price: value,
-                    timestamp: current-time
+                    timestamp: current-block
                 }
             )
             (var-set transaction-counter transaction-id)
@@ -148,7 +148,7 @@
 ;; Property transfer initiation
 (define-public (initiate-transfer (property-id uint) (to principal) (price uint))
     (let ((property-data (unwrap! (get-property property-id) ERR-PROPERTY-NOT-FOUND))
-          (current-time (unwrap! (get-block-info? time (- block-height u1)) ERR-UNAUTHORIZED)))
+          (current-block stacks-block-height))
         
         ;; Validate caller is property owner
         (asserts! (is-eq (get owner property-data) tx-sender) ERR-UNAUTHORIZED)
@@ -168,8 +168,8 @@
                 from: tx-sender,
                 to: to,
                 price: price,
-                initiated-at: current-time,
-                expires-at: (+ current-time u86400) ;; 24 hours in seconds
+                initiated-at: current-block,
+                expires-at: (+ current-block u144) ;; ~24 hours in blocks
             }
         )
         
@@ -181,20 +181,20 @@
 (define-public (complete-transfer (property-id uint))
     (let ((property-data (unwrap! (get-property property-id) ERR-PROPERTY-NOT-FOUND))
           (transfer-data (unwrap! (get-pending-transfer property-id) ERR-NO-PENDING-TRANSFER))
-          (current-time (unwrap! (get-block-info? time (- block-height u1)) ERR-UNAUTHORIZED)))
+          (current-block stacks-block-height))
         
         ;; Validate caller is the intended recipient
         (asserts! (is-eq (get to transfer-data) tx-sender) ERR-UNAUTHORIZED)
         
         ;; Check transfer hasn't expired
-        (asserts! (< current-time (get expires-at transfer-data)) ERR-NO-PENDING-TRANSFER)
+        (asserts! (< current-block (get expires-at transfer-data)) ERR-NO-PENDING-TRANSFER)
         
         ;; Update property ownership
         (map-set properties
             { property-id: property-id }
             (merge property-data {
                 owner: tx-sender,
-                last-updated: current-time,
+                last-updated: current-block,
                 value: (get price transfer-data)
             })
         )
@@ -211,7 +211,7 @@
                     new-owner: tx-sender,
                     transaction-type: "transfer",
                     price: (get price transfer-data),
-                    timestamp: current-time
+                    timestamp: current-block
                 }
             )
             (var-set transaction-counter transaction-id)
@@ -238,7 +238,7 @@
 ;; Property value update (owner only)
 (define-public (update-property-value (property-id uint) (new-value uint))
     (let ((property-data (unwrap! (get-property property-id) ERR-PROPERTY-NOT-FOUND))
-          (current-time (unwrap! (get-block-info? time (- block-height u1)) ERR-UNAUTHORIZED)))
+          (current-block stacks-block-height))
         
         ;; Validate caller is property owner
         (asserts! (is-eq (get owner property-data) tx-sender) ERR-UNAUTHORIZED)
@@ -250,7 +250,7 @@
             { property-id: property-id }
             (merge property-data {
                 value: new-value,
-                last-updated: current-time
+                last-updated: current-block
             })
         )
         
@@ -261,7 +261,7 @@
 ;; Deactivate property (owner only)
 (define-public (deactivate-property (property-id uint))
     (let ((property-data (unwrap! (get-property property-id) ERR-PROPERTY-NOT-FOUND))
-          (current-time (unwrap! (get-block-info? time (- block-height u1)) ERR-UNAUTHORIZED)))
+          (current-block stacks-block-height))
         
         ;; Validate caller is property owner
         (asserts! (is-eq (get owner property-data) tx-sender) ERR-UNAUTHORIZED)
@@ -278,7 +278,7 @@
             { property-id: property-id }
             (merge property-data {
                 is-active: false,
-                last-updated: current-time
+                last-updated: current-block
             })
         )
         

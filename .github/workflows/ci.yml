@@ -1,13 +1,17 @@
 name: CI
-on: [push]
+on: [push, pull_request]
 jobs:
-  tests:
-    name: "land-registry"
+  test:
+    name: "Clarinet Tests"
     runs-on: ubuntu-latest
     steps:
       - name: "Checkout code"
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
       - name: "Check contract syntax"
         uses: docker://hirosystems/clarinet:latest
         with:
           args: check
+      - name: "Validate contract format"
+        uses: docker://hirosystems/clarinet:latest
+        with:
+          args: format --check
