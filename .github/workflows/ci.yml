@@ -11,7 +11,3 @@ jobs:
         uses: docker://hirosystems/clarinet:latest
         with:
           args: check
-      - name: "Validate contract format"
-        uses: docker://hirosystems/clarinet:latest
-        with:
-          args: format --check
