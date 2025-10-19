@@ -1,0 +1,50 @@
+[network]
+name = "devnet"
+deployment_fee_rate = 10
+
+[accounts.deployer]
+mnemonic = "twice kind fence tip hidden tilt action fragile skin nothing glory cousin green tomorrow spring wrist shed math olympic multiply hip blue scout claw"
+balance = 1_000_000_000_000
+
+[accounts.wallet_1]
+mnemonic = "sell invite acquire kitten bamboo drastic jelly vivid peace spawn twice guilt pave pen trash pretty park cube fragile unaware remain midnight betray rebuild"
+balance = 1_000_000_000_000
+
+[accounts.wallet_2]
+mnemonic = "hold excess usual excess ring elephant install account glad dry fragile donkey gaze humble truck breeze nation gasp vacuum limb head keep delay hospital"
+balance = 1_000_000_000_000
+
+[accounts.wallet_3]
+mnemonic = "cycle puppy glare enroll cost improve round trend wrist mushroom prime crater oppose mean silly start reward line gaze wrist rebel wisdom already year"
+balance = 1_000_000_000_000
+
+[accounts.wallet_4]
+mnemonic = "board list obtain sugar hour worth raven scout denial thunder horse logic fury scorpion fold genuine phrase wealth news aim below celery when cabin"
+balance = 1_000_000_000_000
+
+[accounts.wallet_5]
+mnemonic = "design artwork birth music nature enhance birth birth abandon expand announce abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandoned"
+balance = 1_000_000_000_000
+
+[devnet]
+bind = "0.0.0.0:20443"
+bitcoin_peer_port = 18444
+bitcoin_rpc_port = 18443
+bitcoin_rpc_username = "devnet"
+bitcoin_rpc_password = "devnet"
+miner_mnemonic = "twice kind fence tip hidden tilt action fragile skin nothing glory cousin green tomorrow spring wrist shed math olympic multiply hip blue scout claw"
+miner_derivation_path = "m/44'/5757'/0'/0/0"
+orchestrator_port = 20445
+bitcoin_controller_port = 20444
+bitcoin_controller_block_time = 30_000
+working_dir = "tmp/devnet"
+postgres_port = 5432
+postgres_username = "postgres"
+postgres_password = "postgres"
+postgres_database = "stacks_blockchain_api"
+bitcoin_node_image_url = "quay.io/hirosystems/bitcoind:25.0"
+stacks_node_image_url = "localhost:5000/stacks-node:devnet"
+stacks_api_image_url = "hirosystems/stacks-blockchain-api:latest"
+postgres_image_url = "postgres:15"
+stacks_explorer_image_url = "hirosystems/explorer:latest"
+bitcoin_explorer_image_url = "quay.io/hirosystems/bitcoin-explorer:latest"

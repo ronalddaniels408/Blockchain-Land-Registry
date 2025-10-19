@@ -1,0 +1,306 @@
+;; Land Registry Smart Contract - Clarity v3
+;; Manages property ownership, transfers, and registry operations
+
+;; Error constants
+(define-constant ERR-UNAUTHORIZED (err u100))
+(define-constant ERR-PROPERTY-NOT-FOUND (err u101))
+(define-constant ERR-PROPERTY-ALREADY-EXISTS (err u102))
+(define-constant ERR-INVALID-OWNER (err u103))
+(define-constant ERR-TRANSFER-PENDING (err u104))
+(define-constant ERR-NO-PENDING-TRANSFER (err u105))
+(define-constant ERR-INVALID-PRICE (err u106))
+(define-constant ERR-INSUFFICIENT-PAYMENT (err u107))
+
+;; Data structures
+(define-map properties
+    { property-id: uint }
+    {
+        owner: principal,
+        location: (string-ascii 256),
+        size: uint,
+        property-type: (string-ascii 64),
+        value: uint,
+        registration-date: uint,
+        last-updated: uint,
+        is-active: bool
+    }
+)
+
+(define-map pending-transfers
+    { property-id: uint }
+    {
+        from: principal,
+        to: principal,
+        price: uint,
+        initiated-at: uint,
+        expires-at: uint
+    }
+)
+
+(define-map property-history
+    { property-id: uint, transaction-id: uint }
+    {
+        previous-owner: principal,
+        new-owner: principal,
+        transaction-type: (string-ascii 32),
+        price: uint,
+        timestamp: uint
+    }
+)
+
+;; Contract state
+(define-data-var property-counter uint u0)
+(define-data-var transaction-counter uint u0)
+(define-data-var contract-owner principal tx-sender)
+(define-data-var registry-fee uint u1000) ;; Fee in microSTX
+
+;; Read-only functions
+(define-read-only (get-property (property-id uint))
+    (map-get? properties { property-id: property-id })
+)
+
+(define-read-only (get-property-owner (property-id uint))
+    (match (map-get? properties { property-id: property-id })
+        property-data (some (get owner property-data))
+        none
+    )
+)
+
+(define-read-only (get-pending-transfer (property-id uint))
+    (map-get? pending-transfers { property-id: property-id })
+)
+
+(define-read-only (get-property-history (property-id uint) (transaction-id uint))
+    (map-get? property-history { property-id: property-id, transaction-id: transaction-id })
+)
+
+(define-read-only (get-total-properties)
+    (var-get property-counter)
+)
+
+(define-read-only (get-registry-fee)
+    (var-get registry-fee)
+)
+
+(define-read-only (is-property-owner (property-id uint) (user principal))
+    (match (get-property-owner property-id)
+        owner (is-eq owner user)
+        false
+    )
+)
+
+;; Property registration
+(define-public (register-property 
+    (location (string-ascii 256))
+    (size uint)
+    (property-type (string-ascii 64))
+    (value uint)
+)
+    (let ((property-id (+ (var-get property-counter) u1))
+          (current-time (unwrap! (get-block-info? time (- block-height u1)) ERR-UNAUTHORIZED)))
+        
+        ;; Validate inputs
+        (asserts! (> size u0) ERR-INVALID-PRICE)
+        (asserts! (> value u0) ERR-INVALID-PRICE)
+        (asserts! (> (len location) u0) ERR-UNAUTHORIZED)
+        (asserts! (> (len property-type) u0) ERR-UNAUTHORIZED)
+        
+        ;; Check if property already exists (basic duplicate check)
+        (asserts! (is-none (map-get? properties { property-id: property-id })) ERR-PROPERTY-ALREADY-EXISTS)
+        
+        ;; Register property
+        (map-set properties
+            { property-id: property-id }
+            {
+                owner: tx-sender,
+                location: location,
+                size: size,
+                property-type: property-type,
+                value: value,
+                registration-date: current-time,
+                last-updated: current-time,
+                is-active: true
+            }
+        )
+        
+        ;; Update counter
+        (var-set property-counter property-id)
+        
+        ;; Record transaction history
+        (let ((transaction-id (+ (var-get transaction-counter) u1)))
+            (map-set property-history
+                { property-id: property-id, transaction-id: transaction-id }
+                {
+                    previous-owner: tx-sender,
+                    new-owner: tx-sender,
+                    transaction-type: "registration",
+                    price: value,
+                    timestamp: current-time
+                }
+            )
+            (var-set transaction-counter transaction-id)
+        )
+        
+        (ok property-id)
+    )
+)
+
+;; Property transfer initiation
+(define-public (initiate-transfer (property-id uint) (to principal) (price uint))
+    (let ((property-data (unwrap! (get-property property-id) ERR-PROPERTY-NOT-FOUND))
+          (current-time (unwrap! (get-block-info? time (- block-height u1)) ERR-UNAUTHORIZED)))
+        
+        ;; Validate caller is property owner
+        (asserts! (is-eq (get owner property-data) tx-sender) ERR-UNAUTHORIZED)
+        
+        ;; Validate inputs
+        (asserts! (not (is-eq to tx-sender)) ERR-INVALID-OWNER)
+        (asserts! (> price u0) ERR-INVALID-PRICE)
+        (asserts! (get is-active property-data) ERR-PROPERTY-NOT-FOUND)
+        
+        ;; Check no pending transfer exists
+        (asserts! (is-none (get-pending-transfer property-id)) ERR-TRANSFER-PENDING)
+        
+        ;; Create pending transfer (expires in 144 blocks ~ 24 hours)
+        (map-set pending-transfers
+            { property-id: property-id }
+            {
+                from: tx-sender,
+                to: to,
+                price: price,
+                initiated-at: current-time,
+                expires-at: (+ current-time u86400) ;; 24 hours in seconds
+            }
+        )
+        
+        (ok true)
+    )
+)
+
+;; Complete property transfer
+(define-public (complete-transfer (property-id uint))
+    (let ((property-data (unwrap! (get-property property-id) ERR-PROPERTY-NOT-FOUND))
+          (transfer-data (unwrap! (get-pending-transfer property-id) ERR-NO-PENDING-TRANSFER))
+          (current-time (unwrap! (get-block-info? time (- block-height u1)) ERR-UNAUTHORIZED)))
+        
+        ;; Validate caller is the intended recipient
+        (asserts! (is-eq (get to transfer-data) tx-sender) ERR-UNAUTHORIZED)
+        
+        ;; Check transfer hasn't expired
+        (asserts! (< current-time (get expires-at transfer-data)) ERR-NO-PENDING-TRANSFER)
+        
+        ;; Update property ownership
+        (map-set properties
+            { property-id: property-id }
+            (merge property-data {
+                owner: tx-sender,
+                last-updated: current-time,
+                value: (get price transfer-data)
+            })
+        )
+        
+        ;; Remove pending transfer
+        (map-delete pending-transfers { property-id: property-id })
+        
+        ;; Record transaction history
+        (let ((transaction-id (+ (var-get transaction-counter) u1)))
+            (map-set property-history
+                { property-id: property-id, transaction-id: transaction-id }
+                {
+                    previous-owner: (get from transfer-data),
+                    new-owner: tx-sender,
+                    transaction-type: "transfer",
+                    price: (get price transfer-data),
+                    timestamp: current-time
+                }
+            )
+            (var-set transaction-counter transaction-id)
+        )
+        
+        (ok true)
+    )
+)
+
+;; Cancel pending transfer
+(define-public (cancel-transfer (property-id uint))
+    (let ((transfer-data (unwrap! (get-pending-transfer property-id) ERR-NO-PENDING-TRANSFER)))
+        
+        ;; Only initiator can cancel
+        (asserts! (is-eq (get from transfer-data) tx-sender) ERR-UNAUTHORIZED)
+        
+        ;; Remove pending transfer
+        (map-delete pending-transfers { property-id: property-id })
+        
+        (ok true)
+    )
+)
+
+;; Property value update (owner only)
+(define-public (update-property-value (property-id uint) (new-value uint))
+    (let ((property-data (unwrap! (get-property property-id) ERR-PROPERTY-NOT-FOUND))
+          (current-time (unwrap! (get-block-info? time (- block-height u1)) ERR-UNAUTHORIZED)))
+        
+        ;; Validate caller is property owner
+        (asserts! (is-eq (get owner property-data) tx-sender) ERR-UNAUTHORIZED)
+        (asserts! (> new-value u0) ERR-INVALID-PRICE)
+        (asserts! (get is-active property-data) ERR-PROPERTY-NOT-FOUND)
+        
+        ;; Update property value
+        (map-set properties
+            { property-id: property-id }
+            (merge property-data {
+                value: new-value,
+                last-updated: current-time
+            })
+        )
+        
+        (ok true)
+    )
+)
+
+;; Deactivate property (owner only)
+(define-public (deactivate-property (property-id uint))
+    (let ((property-data (unwrap! (get-property property-id) ERR-PROPERTY-NOT-FOUND))
+          (current-time (unwrap! (get-block-info? time (- block-height u1)) ERR-UNAUTHORIZED)))
+        
+        ;; Validate caller is property owner
+        (asserts! (is-eq (get owner property-data) tx-sender) ERR-UNAUTHORIZED)
+        (asserts! (get is-active property-data) ERR-PROPERTY-NOT-FOUND)
+        
+        ;; Cancel any pending transfers
+        (match (get-pending-transfer property-id)
+            pending-transfer (map-delete pending-transfers { property-id: property-id })
+            true
+        )
+        
+        ;; Deactivate property
+        (map-set properties
+            { property-id: property-id }
+            (merge property-data {
+                is-active: false,
+                last-updated: current-time
+            })
+        )
+        
+        (ok true)
+    )
+)
+
+;; Administrative functions (contract owner only)
+(define-public (set-registry-fee (new-fee uint))
+    (begin
+        (asserts! (is-eq tx-sender (var-get contract-owner)) ERR-UNAUTHORIZED)
+        (asserts! (> new-fee u0) ERR-INVALID-PRICE)
+        (var-set registry-fee new-fee)
+        (ok true)
+    )
+)
+
+(define-public (transfer-ownership (new-owner principal))
+    (begin
+        (asserts! (is-eq tx-sender (var-get contract-owner)) ERR-UNAUTHORIZED)
+        (asserts! (not (is-eq new-owner tx-sender)) ERR-INVALID-OWNER)
+        (var-set contract-owner new-owner)
+        (ok true)
+    )
+)

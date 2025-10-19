@@ -1,4 +1,4 @@
-﻿[project]
+[project]
 name = 'land-registry'
 description = 'Blockchain-based land registry system'
 authors = []
