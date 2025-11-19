@@ -10,6 +10,10 @@
 (define-constant ERR-NO-PENDING-TRANSFER (err u105))
 (define-constant ERR-INVALID-PRICE (err u106))
 (define-constant ERR-INSUFFICIENT-PAYMENT (err u107))
+(define-constant ERR-MORTGAGE-NOT-FOUND (err u108))
+(define-constant ERR-MORTGAGE-ALREADY-EXISTS (err u109))
+(define-constant ERR-MORTGAGE-ACTIVE (err u110))
+(define-constant ERR-INVALID-AMOUNT (err u111))
 
 ;; Data structures
 (define-map properties
@@ -45,6 +49,23 @@
         transaction-type: (string-ascii 32),
         price: uint,
         timestamp: uint
+    }
+)
+
+(define-map mortgages
+    { property-id: uint }
+    {
+        owner: principal,
+        lender: principal,
+        principal-amount: uint,
+        remaining-balance: uint,
+        interest-rate: uint,
+        term-months: uint,
+        monthly-payment: uint,
+        start-date: uint,
+        next-payment-due: uint,
+        is-active: bool,
+        payments-made: uint
     }
 )
 
@@ -85,6 +106,17 @@
 (define-read-only (is-property-owner (property-id uint) (user principal))
     (match (get-property-owner property-id)
         owner (is-eq owner user)
+        false
+    )
+)
+
+(define-read-only (get-mortgage (property-id uint))
+    (map-get? mortgages { property-id: property-id })
+)
+
+(define-read-only (has-active-mortgage (property-id uint))
+    (match (get-mortgage property-id)
+        mortgage-data (get is-active mortgage-data)
         false
     )
 )
@@ -301,6 +333,133 @@
         (asserts! (is-eq tx-sender (var-get contract-owner)) ERR-UNAUTHORIZED)
         (asserts! (not (is-eq new-owner tx-sender)) ERR-INVALID-OWNER)
         (var-set contract-owner new-owner)
+        (ok true)
+    )
+)
+
+;; Create mortgage for property
+(define-public (create-mortgage
+    (property-id uint)
+    (lender principal)
+    (principal-amount uint)
+    (interest-rate uint)
+    (term-months uint)
+    (monthly-payment uint)
+)
+    (let ((property-data (unwrap! (get-property property-id) ERR-PROPERTY-NOT-FOUND))
+          (current-block stacks-block-height))
+        
+        (asserts! (is-eq (get owner property-data) tx-sender) ERR-UNAUTHORIZED)
+        (asserts! (is-none (get-mortgage property-id)) ERR-MORTGAGE-ALREADY-EXISTS)
+        (asserts! (> principal-amount u0) ERR-INVALID-AMOUNT)
+        (asserts! (> monthly-payment u0) ERR-INVALID-AMOUNT)
+        (asserts! (> term-months u0) ERR-INVALID-AMOUNT)
+        (asserts! (get is-active property-data) ERR-PROPERTY-NOT-FOUND)
+        (asserts! (not (is-eq lender tx-sender)) ERR-INVALID-OWNER)
+        
+        (map-set mortgages
+            { property-id: property-id }
+            {
+                owner: tx-sender,
+                lender: lender,
+                principal-amount: principal-amount,
+                remaining-balance: principal-amount,
+                interest-rate: interest-rate,
+                term-months: term-months,
+                monthly-payment: monthly-payment,
+                start-date: current-block,
+                next-payment-due: (+ current-block u144),
+                is-active: false,
+                payments-made: u0
+            }
+        )
+        
+        (ok true)
+    )
+)
+
+;; Accept mortgage offer (lender confirms)
+(define-public (accept-mortgage (property-id uint))
+    (let ((mortgage-data (unwrap! (get-mortgage property-id) ERR-MORTGAGE-NOT-FOUND)))
+        
+        (asserts! (is-eq (get lender mortgage-data) tx-sender) ERR-UNAUTHORIZED)
+        (asserts! (not (get is-active mortgage-data)) ERR-MORTGAGE-ACTIVE)
+        
+        (map-set mortgages
+            { property-id: property-id }
+            (merge mortgage-data {
+                is-active: true
+            })
+        )
+        
+        (ok true)
+    )
+)
+
+;; Make mortgage payment
+(define-public (make-mortgage-payment (property-id uint) (payment-amount uint))
+    (let ((mortgage-data (unwrap! (get-mortgage property-id) ERR-MORTGAGE-NOT-FOUND))
+          (current-block stacks-block-height))
+        
+        (asserts! (is-eq (get owner mortgage-data) tx-sender) ERR-UNAUTHORIZED)
+        (asserts! (get is-active mortgage-data) ERR-MORTGAGE-NOT-FOUND)
+        (asserts! (> payment-amount u0) ERR-INVALID-AMOUNT)
+        (asserts! (>= payment-amount (get monthly-payment mortgage-data)) ERR-INSUFFICIENT-PAYMENT)
+        
+        (let ((new-balance (if (>= (get remaining-balance mortgage-data) payment-amount)
+                                (- (get remaining-balance mortgage-data) payment-amount)
+                                u0))
+              (payments-count (+ (get payments-made mortgage-data) u1))
+              (is-paid-off (is-eq new-balance u0)))
+            
+            (map-set mortgages
+                { property-id: property-id }
+                (merge mortgage-data {
+                    remaining-balance: new-balance,
+                    next-payment-due: (if is-paid-off current-block (+ current-block u144)),
+                    is-active: (not is-paid-off),
+                    payments-made: payments-count
+                })
+            )
+            
+            (ok true)
+        )
+    )
+)
+
+;; Default on mortgage (lender takes action)
+(define-public (default-mortgage (property-id uint))
+    (let ((mortgage-data (unwrap! (get-mortgage property-id) ERR-MORTGAGE-NOT-FOUND))
+          (property-data (unwrap! (get-property property-id) ERR-PROPERTY-NOT-FOUND))
+          (current-block stacks-block-height))
+        
+        (asserts! (is-eq (get lender mortgage-data) tx-sender) ERR-UNAUTHORIZED)
+        (asserts! (get is-active mortgage-data) ERR-MORTGAGE-NOT-FOUND)
+        (asserts! (> current-block (+ (get next-payment-due mortgage-data) u144)) ERR-INVALID-OWNER)
+        
+        (map-delete mortgages { property-id: property-id })
+        (map-set properties
+            { property-id: property-id }
+            (merge property-data {
+                owner: tx-sender,
+                last-updated: current-block
+            })
+        )
+        
+        (let ((transaction-id (+ (var-get transaction-counter) u1)))
+            (map-set property-history
+                { property-id: property-id, transaction-id: transaction-id }
+                {
+                    previous-owner: (get owner mortgage-data),
+                    new-owner: tx-sender,
+                    transaction-type: "foreclosure",
+                    price: (get remaining-balance mortgage-data),
+                    timestamp: current-block
+                }
+            )
+            (var-set transaction-counter transaction-id)
+        )
+        
         (ok true)
     )
 )
